@@ -10,5 +10,5 @@ Description: Symbolic operation functions, including simplifier, symbolic match 
     and rule based simplifier generator.  More higher level mathematical objects including 
     morphism and random disturbations. Also experimental code for creating and manipulating model spec.
 LazyLoad: yes
-License: LGPL
+License: MIT + file LICENSE
 RoxygenNote: 6.0.1
