@@ -1,0 +1,516 @@
+\documentclass[a4paper, 10pt, notitlepage]{article}
+\usepackage{amsthm,amsmath}
+\usepackage{amssymb}
+\usepackage[pdftex]{graphicx}
+\usepackage{fancyvrb,framed}
+\usepackage{color,makeidx}
+\usepackage[top=4cm,bottom=3cm,left=4cm,right=3cm]{geometry}
+% Command for code that is not in boxes
+\newcommand{\code}[1]{\texttt{#1}}
+% Command for R functions
+\newcommand{\rfun}[1]{\texttt{#1}}
+\newcommand{\rr}{ {\mathbb{R}} }
+
+\begin{document}
+% shrink topsep
+\fvset{listparameters={\setlength{\topsep}{1pt}}}
+\setlength{\OuterFrameSep}{1pt}
+\setlength{\FrameSep}{1pt}
+\linespread{0.9}
+% my own style for code, should override R Sweave option
+\DefineVerbatimEnvironment{Sinput}{Verbatim}{fontshape=sl,frame=none,fontsize=\normalsize}
+\DefineVerbatimEnvironment{Soutput}{Verbatim}{frame=none,fontsize=\normalsize}
+\newcommand{\setscriptszroutput}{%
+\DefineVerbatimEnvironment{Soutput}{Verbatim}{frame=none,fontsize=\scriptsize}
+}%
+\newcommand{\settinyroutput}{%
+\DefineVerbatimEnvironment{Soutput}{Verbatim}{frame=none,fontsize=\tiny}
+}%
+\newcommand{\setsamepageroutput}{%
+\DefineVerbatimEnvironment{Soutput}{Verbatim}{frame=none,fontsize=\normalsize,samepage=true}
+}%
+\newcommand{\resetroutput}{%
+\DefineVerbatimEnvironment{Soutput}{Verbatim}{frame=none,fontsize=\normalsize}
+}%
+\renewenvironment{Schunk}%
+{%
+\begin{oframed}
+}
+{%
+\end{oframed}
+}
+
+\title{Manipulate model in symbolicR}
+\author{Jinjing Xie}
+\maketitle
+
+\tableofcontents
+% \VignetteIndexEntry{"SymbolicR"}
+\SweaveOpts{keep.source=TRUE}
+<<echo=FALSE,results=hide>>=
+require(symbolicR)
+options(width=130,continue=" ")
+options(warn=1) # make warning immediate happen
+@
+
+\newcommand{\packVersion}{\Sexpr{packageDescription('symbolicR')$Version}}
+\section{Introduction}
+\paragraph{} R is good at data processing, numeric computation. However, there is few package can do symbolic operations. 
+From the low level point of view, R can be thought of a Lisp dialect, hence it is possible to do symbolic operations in a convenient way.
+
+The original purpose of this package is to provide low level APIs which can be used by the application level package \code{DDMoReMDL}.  Now \code{symbolicR} contains at least three basic components, \emph{simplifier}, \emph{symbolic matcher} and \emph{rule based simplifier}, moreover there are adhoc \emph{intermediate object representation} holding imported \emph{NONMEM} control files as \emph{model spec}.
+
+\section{General Purpose Symbolic Operation}
+\paragraph{} The most useful functions for simplifying a mathematical expression are \code{simplify} and \code{simplify.2}(I haven't get better idea on naming yet).
+<<echo=TRUE>>=
+s1 = quote( 1 + 2 - 0 * sin(x) + (a+b)^2 - x + exp(ETA[1]) - 3 )
+s1
+simplify(s1)
+simplify.2(s1)
+@
+Note, a quoted expression in R has class ``call''. Our simplify functions can deal with ``symbol'', ``atomic'' and ``call'' types. But won't work well
+with a list structure. You may in general use \code{lapply} or \code{for} loop to simplify more than one expressions. One thing may cause confusion is
+the simplify function can \emph{not} deal with R class ``expression''. This is because ``expression'' in R can hold more than one expression in it.
+<<echo=TRUE>>=
+es = parse(text=' a + b ; c + d')
+es
+class(es)
+as.list(es)
+@
+In this package, we have not use ``expression'' for a list of ``call'', however, we store multiple expressions(calls) in a plain list. And in this article,
+when we speak of ``expression'', we mean a ``call'' or ``symbol'' or ``atomic'', not mean the R class \code{expression}.
+
+In first example, you will notice \code{simplify.2} can do deeper simplification than \code{simplify}. All atomic numbers 1, 2, and -3 are collected by \code{simplify.2}
+and simplified to 0, rather than just do the atomic combination to the nearby ones as \code{simplify} does. But coverting minus $x$ into $-1 \cdot x$ is not very satisfactory.
+Although it's convenient for further symbolic processing, we prefer better looking.
+<<echo=TRUE>>=
+simplify.pretty.01(simplify.2(s1))
+@
+The above \code{simplify.pretty.01} for converting the expression into more natural way for human reading. Typically, we will call that function before last exporting.
+
+\section{Symbolic Matcher And Rule based Simplifier}
+Except the basic \code{simplify} function, many functions in this pacakge depend on \code{symbolic.match}, which behaviors like regular expression matcher, and
+play an important role in the rule based simplifier generator.
+
+\subsection{Symbolic Matcher}
+Expression is a tree based data structure, there are many ways for retrieving nodes and leaves in a tree, also many ways of finding the shape of the tree. Pattern matcher
+is one of the most easiest way of doing that. It might be not machine efficient, but will be sufficient neglectable short comparing to the very common hours 
+running time of NONMEM or other estimation and simulation tasks.
+
+In NONMEM, we usually encode a normal random parameter in an expression $\theta_i + \eta_i$. First example is showing how this pattern is recognized.
+<<echo=TRUE>>=
+s2 = quote( THETA[1] + ETA[1] )
+re = symbolic.match( quote( '?'(fixed.val) + '?'(random.val) ), s2)
+re
+fixed.val
+random.val
+@
+The \code{symbolic.match} expects its first argument to be a pattern expression and the second argument to be the target expression. The function tries to match the two
+expression trees. The two trees is matched if and only if the root and all its children are matched. The interesting part are those terms started with \code{'?'}, which we call
+the pattern variable. The pattern variable can matcher some specified type of expressions and store the matched parts in the variables which can be used later.
+
+We list some common type modifier here, the first two \code{'?'} and \code{'?a'} might be the most useful ones among our package.
+\begin{itemize} \setlength{\itemsep}{-3pt}
+    \item  \code{'?'(varname)} matches anything
+    \item  \code{'?a'(varname)} matches any atomic (number or character)
+    \item  \code{'?s'(varname)} (or \code{'?v'(varname)} matches a symbol (memoric: \code{v} is variable and \code{s} is symbol)
+    \item  \code{'?c'(varname)} matches character
+    \item  \code{'?()'(varname)} matches a name of a call
+    \item  \code{'?[]'(varname)} matches an array name
+\end{itemize}
+
+During matching, if same pattern variable appear twice (or more), the target expression should be same at the corresponding places as well to get the whole pattern matched.
+<<echo=TRUE>>=
+symbolic.match( quote( '?'(adder1) + '?'(adder2) ), 
+                quote( THETA[1] + THETA[2] ))
+symbolic.match( quote( '?'(adder1) + '?'(adder1) ), 
+                quote( THETA[1] + THETA[2] ))
+symbolic.match( quote( '?'(adder1) + '?'(adder1) ), 
+                quote( THETA[1] + THETA[1] ))
+@
+
+But remember, it's just a symbolic matcher, it only compares the two tree structures (the pattern tree, and target tree) to see if they match each other. There is no magic it can find fixed or random part as you may expected.
+See the following example.
+<<echo=TRUE>>=
+s3 = quote( THETA[1] * (1 + ETA[2]) + ETA[1] )
+pat3 = quote( '?'(fixed.val) + '?'(random.val) )
+symbolic.match(pat3, s3)
+@
+
+It will be clear the pattern matches target considering the actual trees of both expressions as following.
+\setsamepageroutput
+<<echo=TRUE>>=
+symbolic.draw.tree(s3)
+symbolic.draw.tree(pat3)
+fixed.val
+random.val
+@
+
+The ``\code{+}'' sign matches the root of \code{s3}, and the \code{'?'(fixed.val)} matches to the left subtree (remember our definition for \code{'?'(variable)} can
+match anything) of \code{s3} and \code{'?'(random.val)} matches to the right subtree of \code{s3}. That explains why they match. 
+You can set more specific patterns, and the results differ.
+
+<<echo=TRUE>>=
+pat4 = quote( '?a'(fixed.val) + '?'(random.val) )
+symbolic.match(pat4, s3)
+pat5 = quote( THETA['?a'(index.theta)] * '?'(Coefficient) + '?'(random.val) )
+symbolic.match(pat5, s3)
+symbolic.draw.tree(pat5)
+Coefficient
+@
+\resetroutput
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Rule based simplifier generator}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+When human do simplifications on an equation, we usually use this simple strategies -- try possible transformations on the source expression, and do the transformations on intermediate expression until no more transformations 
+can be done. Here we let computer do similar thing. 
+
+For example, we want the program do following transformations as a simplification strategy:
+\begin{align*}
+         x \log(y) & \Longrightarrow \log(y^x) \\
+    \log(u) + \log(v) & \Longrightarrow \log(uv) \\
+    \exp(\log(u)) & \Longrightarrow u \\
+    \exp( u + v ) & \Longrightarrow \exp(u) * \exp(v) 
+\end{align*}
+where $x$ is a simple expression (here we mean a symbol, or number or an array entry  $a[i]$) and $u,v$ can be any expression.
+
+These rules can be written as following:
+
+\begin{Verbatim}[frame=single,fontshape=sl, fontsize=\normalsize]
+" '?s'(X) * log('?'(Y)) "  ,        " log( ':'(Y)^':'(X) ) ",
+" '?a'(X) * log('?'(Y)) "  ,        " log( ':'(Y)^':'(X) ) ",
+" '?s'(X)['?'(XX)] * log('?'(Y)) "  ,        " log( ':'(Y)^':'(X)[':'(XX)] ) ",
+"log('?'(X)) + log('?'(Y))",            "log(':'(X) * ':'(Y))",
+"exp(log('?'(X)))" ,                 "':'(X)",
+"exp('?'(X) + '?'(Y))",             " exp(':'(X)) * exp(':'(Y)) "
+\end{Verbatim}
+
+The first three lines capture the idea of converting a simple expression times a logarithmatic expression into a logarithmatic expression with corresponding exponentials.
+Other lines caputure the tranformation rules for $u$ and $v$. The expressions in the right side are called skeleton expressions. The \code{':'} expression are used for
+retrieving the values captured in the left part.
+
+The generator function is \code{symbolic.simplify.gigo}. Its only input is a list of rules, each rule is again a list of exactly two entries, first is the pattern expression,
+the second can be a skeleton expression or a R function take in the matched expression and a matched dictionary of pattern variables and output an expression.
+
+If both two entries of a rule are expressions, there is a handy macro \code{character.rules.to.list.rules} converting a character vector as shown above into the list which
+\code{symbolic.simplify.gigo} expects.
+
+<<echo=TRUE>>=
+rules = character.rules.to.list.rules(c(
+" '?s'(X) * log('?'(Y)) "  ,        " log( ':'(Y)^':'(X) ) ",
+" '?a'(X) * log('?'(Y)) "  ,        " log( ':'(Y)^':'(X) ) ",
+" '?s'(X)['?'(XX)] * log('?'(Y)) "  ,        " log( ':'(Y)^':'(X)[':'(XX)] ) ",
+"log('?'(X)) + log('?'(Y))",            "log(':'(X) * ':'(Y))",
+"exp(log('?'(X)))" ,                 "':'(X)",
+"exp('?'(X) + '?'(Y))",             " exp(':'(X)) * exp(':'(Y)) "))
+simplify.log = symbolic.simplify.gigo(rules)
+simplify.log(quote( exp(log(sin(x)))  ))
+simplify.log(quote( THETA[2]*log( 1 - ETA[2] ) ))
+nested.exp = quote( a * log( b * log( c * log( x + y))))
+simplify.log(nested.exp)
+@
+The last example shows the simplifier will try the rules until no more rules can be applied. (Some bad written rule does make the simplifier none-stop and break the stack)
+
+%%%%
+\newcommand{\eps}{ \varepsilon }
+\section{Intermediate Objects}
+The main purpose of the analysing code is to break the NONMEM code into smaller meaningful units. The kernel part is to free the binding of NONMEM paramters
+$\theta_i, \eta_i, \eps_i$ in an expression.
+
+When we first met $CL = \theta_1 + \eta_1$ in PK code, we actually mean we want to introduce two parameters to be estimated. One is a fixed one, called $\theta_1$, and
+actually the index 1 is not important for the meaning. But $1$ is important when $\theta_1$ is used(referred) in the following code. And it is also important for looking up
+its boundary and initial estimation values from THETA block of the control file.
+
+\subsection{morphism}
+Here we introduced the object class \code{morphism} which representing a mapping from subset of Euclidean space to a Euclidean space. It has three slots, (i) domain (ii) image
+and (iii) definition. Domain is a domain expression, which is natural for human reading. We have following ones.
+
+\begin{itemize}\setlength{\itemsep}{-3pt}
+    \item \code{RealNumber\symbol{94}n} means $\rr^n$
+    \item \code{PositiveRealNumber\symbol{94}n} means $(0,\infty)^n$
+    \item \code{ClosedInterval[a,b]\symbol{94}n} means $[a,b]^n$
+\end{itemize}
+The dimension notation by \code{ \symbol{94}n} is \emph{required}, even $n$ equals to 1.
+And the Cartesian product notation is supported, e.g. $[a,b] \times [c,d]$ is written as 
+\code{ClosedInterval[a,b]\symbol{94}1 * ClosedInterval[c,d]\symbol{94}1} .
+
+We can create morphism from a expression using \code{morphism.unapply},
+<<echo=TRUE>>=
+m1 = morphism.unapply(quote( x + (WT/70)^y ), quote(TUPLE(x,y)))
+m1
+@
+
+The morphism will be displayed in a pleasure way by the S3 print method.
+We also recorded several common patterns as known morphism, see the following examples.
+
+<<echo=TRUE>>=
+explain.expression.as.morphism(quote( THETA[1] + 1 ))
+explain.expression.as.morphism(quote( WT * THETA[1] ))
+explain.expression.as.morphism(quote( WT * THETA[1] + W ))
+explain.expression.as.morphism(quote( THETA[1] + Coeff * THETA[2] ))
+explain.expression.as.morphism(quote( THETA[1] * Base ^ THETA[2] ))
+@
+
+It's common to have the mean value of a log normal distribution started by \code{log}, hence
+having a morphism composition representation is quite useful.
+<<echo=TRUE>>=
+explain.expression.as.morphism(quote( log( THETA[1] + Coeff * THETA[2] )) )
+@
+
+Also a convex combination
+<<echo=TRUE>>=
+explain.expression.as.morphism(
+  quote( a*(THETA[1] + C*THETA[2]) + (1-a) * (THETA[3] + C*THETA[4]) ))
+@
+
+A long ifelse statement which can also be though as a affine mapping then choose one entry of the result.
+<<echo=TRUE>>=
+e=quote( ifelse(cond==1, THETA[1]+1, 
+         ifelse(cond==2, THETA[1] + w * THETA[2], 
+         ifelse(cond==3, THETA[2] - THETA[3], NA))))
+explain.expression.as.morphism(e)
+@
+
+\subsection{estimable unit}
+But where to store the initial estimation for the arguments of the arguments of morphism. Mathematically speaking,
+it's not correct to store the initial estimation in the morphism. So we promote a morphism into a \code{estimable.unit} which will represent expression of THETAs and ETAs. 
+
+The idea here is, \code{estimable.unit} can be instantiate into an expression consists of $\theta_i$ and $\eta_j$, but should not contain any $\eps_k$. This design seems not good, but currently it's fine. For a better design, we should create another object represent simple random effects. And also outer object record if it's merely a random effect or random effect with covariance to be estimated. In the current design, in every \code{estimable.unit}, if there is random effects, we will estimate it. Technique speaking, estimable unit is just a morphism, or a expression with a additional class attribute, and initial estimation (if it is a morphism) attribute, and optionally random effect attribute.  Other things need to mention is we treat log normal specially, if for example $CL$ is log normal, the estimable unit consists of the log mean and the covariance.
+
+<<echo=TRUE>>=
+e1 = Canonical.Estimable.Unit.new('log normal')
+e1
+@
+
+% Sweave just drop all message, need to save it by ourselves
+<<echo=FALSE>>=
+warning.save.connection = file()
+sink(warning.save.connection, type='message')
+@
+Of course, you can do modification on it.
+<<echo=TRUE>>=
+update.domain.estimable.unit(e1, quote(RealNumber^1))
+e2 = update.domain.estimable.unit(e1, quote(ClosedInterval[10,100]^1))
+update.initial.estimation.estimable.unit(e2, 15)
+@
+The second line above will print a warning telling that the new domain doesn't contain the initial estimation. The third line modifies initial estimation manually. 
+%show the warnings
+<<echo=FALSE>>=
+cat(paste(readLines(warning.save.connection),collapse='\n'))
+sink(type='message')
+@
+
+If more than one random variables appears in one expression, or the random effect is not as simple as the additive Guassian or multiplicative exponential of normal (log normal), we can not store the structure as morphism with distribution attribute. So, a new class \code{random.disturbation} is introduced for storing those kind of structures. Random disturbation is a varient morphism, which has \code{FIXED} slot storing the indices for fixed part among all arguments of the morphism and \code{RANDOM} slot for the indices of random part among the arguments, the \code{defn} slot is just the morphism and \code{distribution} slot stores multivariable distribution for the random arguments.  The following example first create an estimable unit by but reset its argument to negative domain, this is not correct as a log normal distribution. Hence the \code{estimable.Unit.correct.lognormal} tries to convert it to random disturbation, the whole object remains estimable unit, but internal representation changed a bit.
+
+<<echo=TRUE>>=
+e1 = Canonical.Estimable.Unit.new(c('log normal','basic'))
+e2 = update.domain.estimable.unit(
+        update.initial.estimation.estimable.unit(e1, -10), 
+        quote(ClosedInterval[-Inf,-0.001]^1))
+e2
+e3 = estimable.Unit.correct.lognormal(e2)
+@
+
+\subsection{random observation}
+Actually, random disturbation is more often used in representing the computation of observations in the ERROR block of NONMEM control file. Those expression for computing the observation usually contain more than one random effects (indexed by observation, i.e. the $\eps_i$). Using the same idea of promotion of morphism to estimable unit, we create another class called random observation. For random variables, we have not stored the index information (i.e. the populational, indexed by subject, or observation level, indexed by observations), in the exporting function, program will judge by if it's \code{estimable.unit} or \code{random.observation} to use $\eta$ or $\eps$. However, it's still not possible to store an expression which contain both $\eta$ or $\eps$, maybe in future we will allow that.
+
+\section{Model Spec}
+Now we can combine everything together as an estimable model(we call model spec in the following). 
+There is no easy way to create a model spec manually, so we create it from the an object returned by \code{importNmMod} of package \code{RNMImport}. For easier use, we use the function \code{nonmem2modelspec} to create from \code{DDMoReMDL} package.
+
+\settinyroutput
+<<echo=TRUE>>=
+require(DDMoReMDL)
+m1 = nonmem2modelspec('warf_pca_ka1_ce_emax_ADVAN4.ctl', 
+    system.file('sample.control.files',package='symbolicR'))
+m1
+@
+
+The model spec has four main parts, the meta information, dynamic system used, the PK program and the Observation program. Remember our definition of estimable unit, itself can not contain the covariance information outside its own random effect. For the above example, if $V$ and $CL$ has correlation, we can not store the covariance in either $CL$ or $V$, so the model spec has extra slots for storing the possible covariances among estimable units and random observations.
+
+<<echo=TRUE>>=
+m2 = add.covariance.of.estimable.unit.estimable.model(m1, 'CL', 'EMAX', 0.001)
+m2
+@
+\resetroutput
+
+Now \code{m2} will has extra covariance between $CL$ and $V$. We can also list the parameters.
+<<echo=TRUE>>=
+list.all.parameters.estimable.model(m1)
+@
+
+Or for fixed parts, also list the triple (lower, estimation, upper).
+<<echo=TRUE>>=
+list.all.fixed.parameters.estimable.model(m1,with.triple=T)
+@
+\setscriptszroutput
+You can summary the model's basic PK parameters using S3 version summary. We currently only support those PREDPP subroutines, other dynamics system is not coded at all.
+<<echo=TRUE>>=
+summary(m1)
+@
+\resetroutput
+
+\subsection{specialize estimable unit}
+If your model is general enough, it is alway possible to specialize it to a simpler one. In NONMEM, this can be partly done by putting \code{FIXED} tag to the THETAs,
+or fix the OMEGAs to zero which remove the random effects. Those fix tags saves the labour of changing the PK or ERROR block. But in Model Spec, we do not support the 
+fix tag. Fortunately, the estimable unit can be specialized to simplier estimable unit or just a expression. And the random effect of estimable model also can be removed.
+<<echo=TRUE>>=
+e0 = m1$PK.PROGRAM$CL
+e0
+specialize.estimable.unit(e0)
+@
+By default, estimable unit will be specialized using the stored initial estimation. But you can specialized \code{e0} to even other values.
+<<echo=TRUE>>=
+specialize.estimable.unit(e0, quote(OTHERVAL))
+@
+
+The above specialize version of \code{e0} remains a estimable unit because it still has random effects requiring estimation. This can also be removed.
+<<echo=TRUE>>=
+e1 = remove.random.effect.estimable.unit(e0)
+e1
+specialize.estimable.unit(e1)
+@
+And this is just the typical value printed by the \code{summary} function. These two steps can be done nicer using the following,
+<<echo=TRUE>>=
+specialize.estimable.unit(e0, simplify=TRUE)
+@
+
+We also have a batch version of remove random effects, see the following,
+<<echo=TRUE>>=
+m1.1 = remove.random.effects.estimable.model(m1,all=T)
+list.all.random.parameters.estimable.model(m1.1)
+m1.1.1 = specialize.estimable.units.estimable.model(m1.1,all=T)
+list.all.parameters.estimable.model(m1.1.1)
+@
+\subsection{Batch change of parameters}
+We provide functions to update the initial estimation of fixed paramters and the covariances. The function
+\code{update.all.initial.estimation.estimable.unit.in.estimable.model} will update the interal fixed parameters in all estimable units following the sequence in the data frame returned by \code{list.all.fixed.parameters.estimable.model}.
+
+\settinyroutput
+<<echo=TRUE>>=
+update.all.initial.estimation.estimable.unit.in.estimable.model(m1, 0)
+@
+The initial values is recycled here. Similarly, \code{update.cov.estimable.model} expects a positive definite matrix with the size exactly same
+as all the random effects among all estimable units. It also follows the sequence in the data frame return by 
+\code{list.all.random.parameters.estimable.model}, whose \code{index.by} equaling to \code{subject}.
+
+<<echo=TRUE>>=
+foo = matrix(rnorm(80),ncol=8)
+foo = cov(foo)
+update.cov.estimable.model(m1, foo)
+@
+
+\subsection{Change Code}
+The \code{PK.PROGRAM} and \code{OBS.PROGRAM} are both lists. Each entry can be a simple symbol, a complex expression, or estimable unit(random observation). There is no difficult for changing the
+list of code. However, it is hard to maintain the consistency, the S3 version will do the check when print the model spec. 
+
+Insert a line of code usually does not make problem. For example, if I want to output the $log(EMAX)$ in the output tables, we can add a line at the end of \code{PK.PROGRAM} as following:
+<<echo=TRUE>>=
+m1.i1 = insert.one.line.code.estimable.model(m1, quote(LGMX), 
+            quote(log(EMAX)), where.ind='$')
+m1.i1 
+@
+\resetroutput%
+
+The \code{\symbol{36}} means the end of \code{which.part}, similarly, \code{\symbol{94}} means the head of the code. The integer positive is also fine the \code{where.ind}, the new code will be inserted
+to the given position. The special character \code{\symbol{94}} and \code{\symbol{36}} can also be modifier for a given LHS, e.g. \code{\symbol{94}CL} means to insert the new code before \code{CL} line,
+and \code{CL\symbol{36}} means insert the new line after the \code{CL} line. And if the modifiers are omitted, i.e., \code{CL}, it as the same meaning of \code{\symbol{94}CL}.
+
+Editing and removing one line need more care. The additional covariance need to removed if the related LHS is changed or removed. And if changing the \code{PK.PROGRAM}, we also check if the basic PK
+parameters are sufficient, or the model is not complete.
+
+<<echo=TRUE>>=
+m1.e0 = add.covariance.of.estimable.unit.estimable.model(m1, 'Q', 'KA', 0.002)
+m1.e1 = edit.one.line.code.estimable.model(m1.e0, lhs=quote(Q), rhs=12 )
+length(m1.e0$PK.COV)
+length(m1.e1$PK.COV)
+@
+
+And if you try to remove a basic PK parameter, e.g. \code{Q} as following:
+
+<<echo=FALSE>>=
+sink(warning.save.connection, type='message')
+@
+<<echo=TRUE>>=
+m1.e2 = remove.one.line.code.estimable.model(m1, 'Q')
+@
+A warning will appear as following.
+%show the warnings
+<<echo=FALSE>>=
+cat(paste(readLines(warning.save.connection),collapse='\n'))
+sink(type='message')
+@
+
+\section{Exporting}
+One important use case is to export a nonmem control file. This is done in two steps, first compile the model spec into NONMEM spec, then combine the nonmem spec and the nmmod object (returned by \code{importNmMod}) to generate the control file. NONMEM spec (or say, its source model spec) contains all programable information for the models, but lacking information like the DATA and output TABLE. So we have to retrieve them from nmmod object.
+
+<<echo=TRUE>>=
+compile.model.spec.to.nonmem.spec(m1)
+@
+
+The PK, ERROR, THETA, OMEGA, SIGMA are there. The index of THETAs are generated in sequence, i.e. first fixed paramter in the first estimable unit will be linked to \code{THETA[1]}. The ETAs and EPSs are complicated, a permutation is taken to re-order the numbering so that covariance matrix (OMEGA) can be divided up into block diagonal matrix, as following.
+
+<<echo=TRUE>>=
+compile.model.spec.to.nonmem.spec(m2)
+@
+
+\clearpage
+\addcontentsline{toc}{section}{Appendices}
+\appendix
+\section{The importing process}
+We explain the \code{create.model.spec.from.nmmod.and.nmdata} here.
+
+First, it get the TABLE statements and Dynamic statements to determine which variables are critical and can not be elliminated in the PK code(ERROR code). Then read the ERROR code, determine which variables are needed by ERROR code, merge them with previous critical variables. And then use \code{analyse.0.0} with proper callbacks (\code{socp.filter}) to import those PK and ERROR code.
+
+The imported code still have explicit THETA, ETA and EPS in them. A loop goes through the list, and convert the list into estimable units or random observations. Simple type as atomic or symbol or expression are saved as is. Then if find non-zero covariance of ETAs, the program trackback which this ETAs referring to (i.e. in which estimable.unit, and the subindex for the estimable.unit if more than one random variable in one unit). Extra covariance structure are generated if necessary.
+
+The dynamics description is written in adhoc way, only support PREDPP (No ODE, No PRED explicit code).
+
+The \code{compile.model.spec.to.nonmem.spec} function do the inverse, and will re-organize the sequence of ETAs.
+
+Another function deserves explaining is \code{nonmem.eqns.to.r.eqns}. It takes strings in and output normalized expressions. There are multi stages.
+\begin{enumerate}\setlength{\itemsep}{-3pt}
+    \item string level convertion, change IF THEN ELSE into R valid if else
+    \item change FORTRAN array into R array ( \code{THETA(i)} to \code{THETA[i]} )
+    \item change FORTRAN function into R function (\code{DEXP()} to \code{exp()} )
+    \item change if else statements into ifelse function, elliminate introduced loop of dependence graph
+    \item elliminate constant initialization
+\end{enumerate}
+
+Also to avoid the same THETAs(ETAs, EPSs) appearing multiple time causing the \code{create.model.spec.from.nmmod.and.nmdata} to generate more than one estimable.units for one NONMEM parameter, the 
+\code{eliminate.duplicated.appearence.of.rhs.parameters} will ensure the equation having only one appearence of NONMEM paramters as right hand side.
+
+\section{Basic pattern matcher}
+Here we explain how we recognize the a typical pattern for random effect from an expression. 
+Let's see following example first:
+$$ \mathrm{THETA}[1] + \mathrm{ETA}[1] $$
+This is a normal variable with the mean value $\theta_1$ and variance $\eta_1$. The pattern matcher \code{pattern.distrib.normal} will happily match it.
+
+<<echo=TRUE>>=
+str(pattern.distrib.normal( 
+    quote(THETA[1] + ETA[1]) ))
+@
+
+Now, let consider more complex expression.
+$$ f(\theta_i) + c \eta_j $$
+
+This also works fine.
+<<echo=TRUE>>=
+str(pattern.distrib.normal( 
+    quote(THETA[1] + 10 * ETA[1]) ))
+str(pattern.distrib.normal( 
+    quote( THETA[1] + THETA[1] + 10 * ETA[1]) ))
+str(pattern.distrib.normal( 
+    quote( THETA[1] + THETA[2] + 10 * ETA[1]) ))
+str(pattern.distrib.normal( 
+    quote( THETA[1] * (WT/70)^THETA[2] + LAG * ETA[1] ) ))
+str(pattern.distrib.normal( 
+    quote( THETA[1] + THETA[2] * ETA[1] ) ))
+@
+
+\newcommand{\Var}{ {\mathrm{Var}} }
+But, although they are mathematically correct answers, the last two give the variances as expression depending on other covariable or parameter-to-be-estimate rather than only depending on $\Var(\eta_1)$ itself. So, it can not be created as a morphism plus a random effect, hence in the importing process, we will recognize them as random disturbations and then promote it to the estimable unit.
+
+
+\end{document}

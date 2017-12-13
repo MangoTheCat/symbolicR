@@ -1,0 +1,14 @@
+Package: symbolicR
+Type: Package
+Title: symbolic simplifier, symbolic match and rule based simplifier generator, experimental model spec
+Version: 0.3-01
+Date: 2013-01-07
+Author: Jinjing Xie
+Maintainer: Mango Business Solutions <sales@mango-solutions.com>
+Depends: base
+Description: Symbolic operation functions, including simplifier, symbolic match functions 
+    and rule based simplifier generator.  More higher level mathematical objects including 
+    morphism and random disturbations. Also experimental code for creating and manipulating model spec.
+LazyLoad: yes
+License: LGPL
+RoxygenNote: 6.0.1
